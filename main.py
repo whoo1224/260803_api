@@ -1,9 +1,3 @@
-"""
-최근 10년간, 사용자가 지정한 '월/일' 기준 박스오피스 1~3위를 모아 보여주는 앱
-(KOBIS 오픈API 사용, Streamlit Cloud 배포용)
-- 인증키는 st.secrets["KOBIS_KEY"]에서 불러온다 (코드에 직접 쓰지 않음)
-"""
-
 import streamlit as st
 import pandas as pd
 import requests
