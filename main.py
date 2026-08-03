@@ -1,32 +1,26 @@
 """
-어제자 박스오피스 조회 앱 (KOBIS 오픈API 사용)
-- Streamlit Cloud 배포용
+최근 10년간, 사용자가 지정한 '월/일' 기준 박스오피스 1~3위를 모아 보여주는 앱
+(KOBIS 오픈API 사용, Streamlit Cloud 배포용)
 - 인증키는 st.secrets["KOBIS_KEY"]에서 불러온다 (코드에 직접 쓰지 않음)
 """
 
 import streamlit as st
 import pandas as pd
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo  # 파이썬 표준 라이브러리 (별도 설치 불필요)
 
 # -----------------------------
 # 기본 설정
 # -----------------------------
-st.set_page_config(page_title="어제의 박스오피스", page_icon="🎬", layout="wide")
+st.set_page_config(page_title="역대 박스오피스 (월/일 기준)", page_icon="🎬", layout="wide")
 
 KOBIS_URL = "https://www.kobis.or.kr/kobisopenapi/webservice/rest/boxoffice/searchDailyBoxOfficeList.json"
 
-
-def get_yesterday_kst() -> str:
-    """
-    '어제' 날짜를 한국 시간(KST) 기준으로 계산해서 yyyymmdd 형식 문자열로 반환.
-    배포 서버의 시계가 한국 시간이 아니어도 항상 한국 기준으로 '어제'를 구하기 위해
-    ZoneInfo("Asia/Seoul")를 사용한다.
-    """
-    now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
-    yesterday_kst = now_kst - timedelta(days=1)
-    return yesterday_kst.strftime("%Y%m%d")
+# 상위 몇 위까지 보여줄지 (요청사항: 1~3위)
+TOP_N = 3
+# 최근 몇 년치를 조회할지
+YEARS_BACK = 10
 
 
 def fetch_box_office(target_dt: str):
@@ -78,18 +72,20 @@ def fetch_box_office(target_dt: str):
 
     # 7) 영화 목록이 비어서 오는 경우 (예: 해당 날짜에 집계된 데이터가 없음)
     if len(movie_list) == 0:
-        return False, "조회된 영화 목록이 비어 있습니다. 아직 해당 날짜의 박스오피스 데이터가 집계되지 않았을 수 있으니, 잠시 후 다시 시도해 주세요."
+        return False, "조회된 영화 목록이 비어 있습니다. 해당 날짜의 박스오피스 데이터가 아직 없거나 너무 오래된 날짜일 수 있습니다."
 
     return True, movie_list
 
 
-def build_dataframe(movie_list):
+def build_rows(year: int, movie_list):
     """
-    KOBIS 응답(문자열 숫자 포함)을 화면에 보여줄 표용 데이터프레임으로 변환한다.
+    특정 연도의 KOBIS 응답(문자열 숫자 포함)에서 상위 TOP_N개만 뽑아
+    화면에 보여줄 표용 행(row) 리스트로 변환한다.
     """
     rows = []
-    for movie in movie_list:
+    for movie in movie_list[:TOP_N]:
         rows.append({
+            "연도": year,
             "순위": movie.get("rank"),
             "영화명": movie.get("movieNm"),
             "개봉일": movie.get("openDt"),
@@ -97,61 +93,92 @@ def build_dataframe(movie_list):
             "누적관객수": int(movie.get("audiAcc", 0)),
             "스크린수": int(movie.get("scrnCnt", 0)),
         })
-    df = pd.DataFrame(rows)
-    return df
+    return rows
 
 
 # -----------------------------
 # 화면 구성 시작
 # -----------------------------
-st.title("🎬 어제의 박스오피스")
+st.title("🎬 역대 박스오피스 (월/일 기준, 최근 10년)")
+st.caption(f"원하는 '월/일'을 고르면, 올해를 포함한 최근 {YEARS_BACK}년 동안 같은 날짜의 박스오피스 1~{TOP_N}위를 모아서 보여줍니다.")
 
-target_dt = get_yesterday_kst()
-# 화면에 조회 날짜를 사람이 보기 편한 형태로 표시 (yyyymmdd -> yyyy-mm-dd)
-pretty_date = f"{target_dt[0:4]}-{target_dt[4:6]}-{target_dt[6:8]}"
-st.caption(f"조회 기준일 (한국 시간 기준 어제): {pretty_date}")
+# -----------------------------
+# 사용자 입력: 월 / 일
+# -----------------------------
+col_month, col_day = st.columns(2)
+with col_month:
+    month = st.selectbox("월", list(range(1, 13)), index=0, format_func=lambda m: f"{m}월")
+with col_day:
+    day = st.selectbox("일", list(range(1, 32)), index=0, format_func=lambda d: f"{d}일")
 
-with st.spinner("박스오피스 정보를 불러오는 중입니다..."):
-    ok, result = fetch_box_office(target_dt)
+search_clicked = st.button("조회하기", type="primary")
 
-# 실패한 경우: 빈 화면 대신 무엇을 확인해야 하는지 안내
-if not ok:
-    st.error("박스오피스 정보를 불러오지 못했습니다.")
-    st.warning(result)
+if not search_clicked:
+    st.info("월/일을 선택하고 '조회하기' 버튼을 눌러주세요.")
     st.stop()
 
-movie_list = result
-df = build_dataframe(movie_list)
+# 2월 30일처럼 실제로 존재하지 않는 날짜를 고를 수 있으므로 미리 걸러준다.
+# (달력에 없는 조합은 각 연도별로 존재 여부가 다를 수 있어 연도별로 검사한다.)
+now_kst = datetime.now(ZoneInfo("Asia/Seoul"))
+this_year = now_kst.year
+
+all_rows = []
+error_messages = []          # 연도별 조회 실패 사유 모음
+invalid_date_years = []      # 그 연도에는 존재하지 않는 날짜(예: 윤년 2/29)
+
+with st.spinner("최근 10년치 데이터를 조회하는 중입니다..."):
+    for year in range(this_year - YEARS_BACK + 1, this_year + 1):
+        # 해당 연도에 실제로 존재하는 날짜인지 확인 (예: 2월 29일은 윤년에만 존재)
+        try:
+            datetime(year, month, day)
+        except ValueError:
+            invalid_date_years.append(year)
+            continue
+
+        target_dt = f"{year}{month:02d}{day:02d}"
+        ok, result = fetch_box_office(target_dt)
+
+        if not ok:
+            error_messages.append(f"- {year}년: {result}")
+            continue
+
+        all_rows.extend(build_rows(year, result))
 
 # -----------------------------
-# 1위 영화: 지표 카드 세 장
+# 결과가 하나도 없는 경우: 빈 화면 대신 안내
 # -----------------------------
-top_movie = df.iloc[0]
-st.subheader(f"🥇 1위: {top_movie['영화명']}")
-
-col1, col2, col3 = st.columns(3)
-col1.metric("어제 관객수", f"{top_movie['관객수']:,} 명")
-col2.metric("누적 관객수", f"{top_movie['누적관객수']:,} 명")
-col3.metric("스크린수", f"{top_movie['스크린수']:,} 개")
-
-st.divider()
+if len(all_rows) == 0:
+    st.error("선택하신 날짜로 조회된 데이터가 하나도 없습니다.")
+    if error_messages:
+        st.warning("연도별 조회 결과를 확인해 주세요:\n" + "\n".join(error_messages))
+    if invalid_date_years:
+        st.warning(
+            f"다음 연도에는 {month}월 {day}일이라는 날짜 자체가 존재하지 않습니다 "
+            f"(예: 윤년이 아닌 해의 2월 29일): {', '.join(str(y) for y in invalid_date_years)}"
+        )
+    st.stop()
 
 # -----------------------------
-# 전체 순위표
+# 일부만 실패한 경우: 표는 보여주되 상단에 안내
 # -----------------------------
-st.subheader("📋 전체 순위표")
+if error_messages or invalid_date_years:
+    with st.expander("⚠️ 일부 연도는 데이터를 가져오지 못했습니다 (자세히 보기)"):
+        if error_messages:
+            st.write("**조회 실패:**")
+            st.markdown("\n".join(error_messages))
+        if invalid_date_years:
+            st.write("**날짜 자체가 존재하지 않음:**")
+            st.write(", ".join(str(y) for y in invalid_date_years))
+
+# -----------------------------
+# 결과 표 출력
+# -----------------------------
+df = pd.DataFrame(all_rows)
+df = df.sort_values(["연도", "순위"], ascending=[False, True]).reset_index(drop=True)
+
+st.subheader(f"📋 {month}월 {day}일 기준, 최근 {YEARS_BACK}년 박스오피스 1~{TOP_N}위")
 st.dataframe(
     df,
     use_container_width=True,
     hide_index=True,
 )
-
-st.divider()
-
-# -----------------------------
-# 관객수 상위 5편 막대그래프
-# -----------------------------
-st.subheader("📊 관객수 상위 5편")
-top5 = df.sort_values("관객수", ascending=False).head(5)
-chart_data = top5.set_index("영화명")["관객수"]
-st.bar_chart(chart_data)
